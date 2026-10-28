@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="bg">#0d1117</color>
+    <color name="panel">#161b22</color>
+    <color name="box">#1c232c</color>
+    <color name="line">#30363d</color>
+    <color name="text">#e6edf3</color>
+    <color name="muted">#9aa5b1</color>
+    <color name="accent">#1565c0</color>
+    <color name="live">#2ea043</color>
+    <color name="danger">#da3633</color>
+    <color name="scrim">#cc000000</color>
+    <color name="ic_launcher_background">#1565c0</color>
+</resources>

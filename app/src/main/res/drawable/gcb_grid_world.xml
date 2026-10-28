@@ -1,0 +1,3 @@
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:gravity="bottom|right" android:width="20dp" android:height="20dp" android:right="2px" android:bottom="2px" android:drawable="@drawable/gcb_world" />
+</layer-list>

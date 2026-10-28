@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<dev.ajithv.triptracker.SquareFrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:background="#000000"
+    android:foreground="?android:attr/selectableItemBackground">
+
+    <ImageView
+        android:id="@+id/g_img"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:scaleType="centerCrop"
+        android:contentDescription="photo" />
+
+    <TextView
+        android:id="@+id/g_play"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:text="▶"
+        android:textColor="#ffffff"
+        android:textSize="22sp"
+        android:shadowColor="#000000"
+        android:shadowRadius="4"
+        android:visibility="gone" />
+
+    <View
+        android:id="@+id/g_hl"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@drawable/grid_hl"
+        android:visibility="gone" />
+
+    <!-- tagging checkboxes (custom button, transparent bg, no labels): top-left = Relatives, bottom-right =
+         World, sitting ~2px in from the thumbnail corners -->
+    <CheckBox
+        android:id="@+id/g_cb_rel"
+        android:layout_width="50dp"
+        android:layout_height="50dp"
+        android:layout_gravity="top|start"
+        android:layout_margin="0dp"
+        android:padding="0dp"
+        android:minWidth="0dp"
+        android:minHeight="0dp"
+        android:button="@null"
+        android:background="@drawable/gcb_grid_rel"
+        android:visibility="gone"
+        android:contentDescription="Relatives" />
+    <CheckBox
+        android:id="@+id/g_cb_world"
+        android:layout_width="50dp"
+        android:layout_height="50dp"
+        android:layout_gravity="bottom|end"
+        android:layout_margin="0dp"
+        android:padding="0dp"
+        android:minWidth="0dp"
+        android:minHeight="0dp"
+        android:button="@null"
+        android:background="@drawable/gcb_grid_world"
+        android:visibility="gone"
+        android:contentDescription="World" />
+</dev.ajithv.triptracker.SquareFrameLayout>

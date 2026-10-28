@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+
+    <!-- direct same-device GPS stream from mymessages; signature-level so only same-signed apps can send -->
+    <permission
+        android:name="dev.ajithv.triptracker.permission.LIVE_POINT"
+        android:protectionLevel="signature" />
+    <uses-permission android:name="dev.ajithv.triptracker.permission.LIVE_POINT" />
+
+    <application
+        android:allowBackup="true"
+        android:largeHeap="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:usesCleartextTraffic="true"
+        android:theme="@style/Theme.TripTracker">
+
+        <!-- Google Maps SDK key (from manifestPlaceholders ← app/secrets.properties tt_maps_key) -->
+        <meta-data
+            android:name="com.google.android.geo.API_KEY"
+            android:value="${MAPS_API_KEY}" />
+
+        <!-- share exported GPX/GeoJSON files out of the app's cache -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
+        <!-- direct GPS fixes from mymessages (explicit broadcast, signature-permission gated) -->
+        <receiver
+            android:name=".LivePointReceiver"
+            android:exported="true"
+            android:permission="dev.ajithv.triptracker.permission.LIVE_POINT">
+            <intent-filter>
+                <action android:name="dev.ajithv.triptracker.LIVE_POINT" />
+            </intent-filter>
+        </receiver>
+
+        <activity
+            android:name=".MainActivity"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
+            android:exported="true"
+            android:launchMode="singleTop">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
