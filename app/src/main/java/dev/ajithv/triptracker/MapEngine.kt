@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.PointF
 import android.os.Bundle
 import android.view.View
@@ -15,6 +16,9 @@ data class LL(val lat: Double, val lon: Double)
  *  count > 1). MainActivity computes these by screen-space clustering; the engine draws them. */
 data class PhotoMarkerSpec(val lat: Double, val lon: Double, val asset: String?, val count: Int, val current: Boolean)
 data class EditPt(val id: Long, val lat: Double, val lon: Double)
+/** A user geofence: a centre placemark + an alert circle of [radiusM] metres. */
+data class GeofenceSpec(val id: Long, val lat: Double, val lon: Double, val radiusM: Double,
+                        val enter: Boolean = true, val exit: Boolean = false, val name: String = "")
 
 object MarkerBitmaps {
     /** A round cluster badge with the count (grows a little with the count). Shared by both engines. */
@@ -31,6 +35,21 @@ object MarkerBitmaps {
         p.textSize = 12f * density; p.isFakeBoldText = true
         val txt = if (count > 999) "999+" else count.toString()
         c.drawText(txt, cx, cy - (p.descent() + p.ascent()) / 2f, p)
+        return bmp
+    }
+    /** A teardrop map pin (blue), anchored at its bottom tip. Used for the temporary search marker. */
+    fun pin(density: Float): Bitmap {
+        val d = density
+        val w = (28f * d).toInt().coerceAtLeast(2); val h = (40f * d).toInt().coerceAtLeast(2)
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val c = Canvas(bmp); val cx = w / 2f; val r = 10f * d; val cy = r + 2f * d
+        val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        val dx = r * 0.70f; val ty = cy + r * 0.55f
+        val path = Path().apply { moveTo(cx - dx, ty); lineTo(cx, h - 1f); lineTo(cx + dx, ty); close() }
+        p.style = Paint.Style.FILL; p.color = Color.parseColor("#1a73e8")
+        c.drawCircle(cx, cy, r, p); c.drawPath(path, p)
+        p.style = Paint.Style.STROKE; p.strokeWidth = 2f * d; p.color = Color.WHITE; c.drawCircle(cx, cy, r, p)
+        p.style = Paint.Style.FILL; p.color = Color.WHITE; c.drawCircle(cx, cy, r * 0.38f, p)
         return bmp
     }
 }
@@ -54,6 +73,12 @@ interface MapEngine {
     // redrawing the whole track. Returns false when it can't (gap reached, state stale) → caller full-renders.
     fun appendLive(v: TripView, liveId: Int?, speedColor: Boolean): Boolean = false
     fun renderPhotos(markers: List<PhotoMarkerSpec>)
+    // User geofences: a centre marker + a metre-radius circle (dark-red outline, 0.3 red fill). No-op default.
+    fun renderGeofences(specs: List<GeofenceSpec>) {}
+    // Long-press on the map (used to add/remove a geofence). No-op default property.
+    var onMapLongPress: ((Double, Double) -> Unit)?
+        get() = null
+        set(_) {}
 
     // ---- manual track editing: draggable markers for the currently-selected points ----
     var onEditDragEnd: ((Long, Double, Double) -> Unit)?
@@ -74,7 +99,11 @@ interface MapEngine {
     fun setSelf(lat: Double?, lon: Double?, headingDeg: Float?, accuracyM: Float?) {}
     // A single movable marker used by trip replay (scrubbing the track). null removes it.
     fun setReplay(lat: Double?, lon: Double?) {}
+    // A single temporary marker at the last searched place. null removes it. Default no-op.
+    fun setSearchMarker(lat: Double?, lon: Double?) {}
     fun screenOf(lat: Double, lon: Double): PointF?
+    // Inverse projection: the lat/lon under a screen pixel (for the drag-to-place pin). Null if not ready.
+    fun fromScreen(x: Float, y: Float): LL?
     fun centerOn(lat: Double, lon: Double, animate: Boolean)
     fun setView(lat: Double, lon: Double, zoom: Double)
     fun fitViews(views: Collection<TripView>)

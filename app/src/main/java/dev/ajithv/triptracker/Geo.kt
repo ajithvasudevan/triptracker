@@ -2,6 +2,7 @@ package dev.ajithv.triptracker
 
 import android.graphics.Color
 import kotlin.math.abs
+import kotlin.math.asin
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.min
@@ -78,4 +79,19 @@ object Geo {
     }
     fun isGapTime(dtSec: Double, intervalS: Int): Boolean =
         dtSec > maxOf(30.0, 3.0 * (if (intervalS > 0) intervalS else 15))
+
+    /** A point [distM] metres from (lat,lon) along [bearingDeg] (great-circle destination). */
+    fun destPoint(lat: Double, lon: Double, bearingDeg: Double, distM: Double): LL {
+        val d = distM / R; val t = Math.toRadians(bearingDeg)
+        val p1 = Math.toRadians(lat); val l1 = Math.toRadians(lon)
+        val p2 = asin(sin(p1) * cos(d) + cos(p1) * sin(d) * cos(t))
+        val l2 = l1 + atan2(sin(t) * sin(d) * cos(p1), cos(d) - sin(p1) * sin(p2))
+        return LL(Math.toDegrees(p2), Math.toDegrees(l2))
+    }
+    /** A closed lat/lon ring approximating a circle of [radiusM] metres (geographic, scales on zoom). */
+    fun circlePolygon(lat: Double, lon: Double, radiusM: Double, steps: Int = 72): List<LL> {
+        val out = ArrayList<LL>(steps + 1)
+        for (i in 0..steps) out.add(destPoint(lat, lon, i * 360.0 / steps, radiusM))
+        return out
+    }
 }

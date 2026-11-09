@@ -212,6 +212,105 @@
         </FrameLayout>
         <!-- /mapwrap -->
 
+        <!-- geofence placement: fixed pin + preview circle at the visible-area centre (the map pans under it) -->
+        <dev.ajithv.triptracker.PlacementPinView
+            android:id="@+id/placement_overlay"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:clickable="false"
+            android:focusable="false"
+            android:visibility="gone" />
+
+        <!-- geofence placement: radius + enter/leave popup, anchored to the bottom -->
+        <LinearLayout
+            android:id="@+id/placement_popup"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom"
+            android:orientation="vertical"
+            android:background="#0d1117"
+            android:padding="12dp"
+            android:visibility="gone">
+            <View android:layout_width="match_parent" android:layout_height="1dp" android:background="@color/line" android:layout_marginBottom="8dp" />
+            <TextView
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:text="Drag the map to position the zone, then set the radius."
+                android:textColor="@color/muted" android:textSize="12sp" android:paddingBottom="8dp" />
+            <EditText
+                android:id="@+id/pl_name"
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:hint="Name (optional)"
+                android:textColor="@color/text" android:textColorHint="@color/muted" android:textSize="15sp"
+                android:inputType="text" android:maxLines="1" android:paddingBottom="4dp" />
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal" android:gravity="center_vertical">
+                <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Radius (m)" android:textColor="@color/text" android:textSize="14sp" />
+                <EditText
+                    android:id="@+id/pl_radius"
+                    android:layout_width="110dp" android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp"
+                    android:inputType="number"
+                    android:textColor="@color/text" android:textSize="15sp" />
+            </LinearLayout>
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal">
+                <CheckBox android:id="@+id/pl_enter" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:text="Notify when entering" android:textColor="@color/text" />
+                <CheckBox android:id="@+id/pl_leave" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:text="Notify when leaving" android:textColor="@color/text" />
+            </LinearLayout>
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal" android:gravity="center_vertical" android:paddingTop="4dp">
+                <Button android:id="@+id/pl_delete" style="?android:attr/buttonBarButtonStyle" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Delete" android:textColor="#ff6b6b" android:visibility="gone" />
+                <View android:layout_width="0dp" android:layout_height="0dp" android:layout_weight="1" />
+                <Button android:id="@+id/pl_cancel" style="?android:attr/buttonBarButtonStyle" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Cancel" android:textColor="@color/text" />
+                <Button android:id="@+id/pl_ok" style="?android:attr/buttonBarButtonStyle" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="OK" android:textColor="#4da3ff" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- place search: a lens button that expands into a search field + results list -->
+        <ImageButton
+            android:id="@+id/search_button"
+            style="@style/TtMapBtn"
+            android:layout_gravity="top|start"
+            android:layout_marginStart="64dp"
+            android:layout_marginTop="10dp"
+            android:src="@drawable/ic_search"
+            android:contentDescription="Search places" />
+
+        <LinearLayout
+            android:id="@+id/search_panel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top"
+            android:layout_margin="10dp"
+            android:orientation="vertical"
+            android:visibility="gone">
+            <LinearLayout
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:orientation="horizontal" android:gravity="center_vertical"
+                android:background="@color/box" android:paddingStart="12dp" android:paddingEnd="4dp">
+                <ImageView android:layout_width="20dp" android:layout_height="20dp" android:src="@drawable/ic_search" android:tint="@color/muted" android:contentDescription="@null" />
+                <EditText
+                    android:id="@+id/search_field"
+                    android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1"
+                    android:layout_marginStart="8dp"
+                    android:hint="Search a place"
+                    android:textColor="@color/text" android:textColorHint="@color/muted" android:textSize="15sp"
+                    android:inputType="text" android:imeOptions="actionSearch" android:singleLine="true"
+                    android:background="@android:color/transparent" />
+                <ImageButton
+                    android:id="@+id/search_close"
+                    android:layout_width="40dp" android:layout_height="40dp"
+                    android:background="@android:color/transparent"
+                    android:src="@drawable/ic_x" android:tint="@color/text" android:contentDescription="Close search" />
+            </LinearLayout>
+            <dev.ajithv.triptracker.MaxHeightScrollView
+                android:id="@+id/search_scroll"
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:background="@color/box" android:visibility="gone" android:scrollbars="vertical">
+                <LinearLayout
+                    android:id="@+id/search_results"
+                    android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:orientation="vertical" />
+            </dev.ajithv.triptracker.MaxHeightScrollView>
+        </LinearLayout>
+
         <!-- ===== photo dock (bottom) ===== -->
         <LinearLayout
             android:id="@+id/dock"
@@ -1105,5 +1204,29 @@
                     android:visibility="gone" />
             </LinearLayout>
         </ScrollView>
+
+        <!-- ZONES page: searchable list of alert zones -->
+        <LinearLayout
+            android:id="@+id/page_zones"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:orientation="vertical"
+            android:padding="10dp"
+            android:visibility="gone">
+            <EditText
+                android:id="@+id/zone_search"
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:hint="Search zones"
+                android:textColor="@color/text" android:textColorHint="@color/muted"
+                android:inputType="text" android:maxLines="1" />
+            <ScrollView
+                android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1">
+                <LinearLayout
+                    android:id="@+id/zone_list"
+                    android:layout_width="match_parent" android:layout_height="wrap_content"
+                    android:orientation="vertical" android:paddingTop="6dp" />
+            </ScrollView>
+        </LinearLayout>
     </LinearLayout>
 </androidx.drawerlayout.widget.DrawerLayout>

@@ -131,4 +131,26 @@ class Api(ctx: Context, private val prefs: Prefs) {
     suspend fun delete(id: Int) { delStr("/api/trips/$id") }
     suspend fun syncPhotos(id: Int): JSONObject = JSONObject(postStr("/api/trips/$id/sync_photos", null))
     suspend fun setBasemap(key: String) { postStr("/api/basemap", JSONObject().put("key", key)) }
+
+    // ---- alert zones (admin; the add-on DB is the shared source of truth) ----
+    suspend fun zones(): List<GeofenceSpec> = parseZones(JSONArray(getStr("/api/zones")))
+    suspend fun zoneCreate(lat: Double, lon: Double, radiusM: Double, enter: Boolean, exit: Boolean, name: String): GeofenceSpec? {
+        val b = JSONObject().put("lat", lat).put("lon", lon).put("radius_m", radiusM)
+            .put("enter", enter).put("exit", exit).put("name", name)
+        return try { parseZone(JSONObject(postStr("/api/zones", b))) } catch (e: Exception) { null }
+    }
+    suspend fun zoneUpdate(id: Long, lat: Double?, lon: Double?, radiusM: Double?, enter: Boolean?, exit: Boolean?, name: String?): GeofenceSpec? {
+        val b = JSONObject()
+        if (lat != null) b.put("lat", lat); if (lon != null) b.put("lon", lon)
+        if (radiusM != null) b.put("radius_m", radiusM)
+        if (enter != null) b.put("enter", enter); if (exit != null) b.put("exit", exit)
+        if (name != null) b.put("name", name)
+        return try { parseZone(JSONObject(postStr("/api/zones/$id", b))) } catch (e: Exception) { null }
+    }
+    suspend fun zoneDelete(id: Long) { delStr("/api/zones/$id") }
+    private fun parseZones(a: JSONArray): List<GeofenceSpec> = (0 until a.length()).mapNotNull { parseZone(a.getJSONObject(it)) }
+    private fun parseZone(o: JSONObject): GeofenceSpec? = try {
+        GeofenceSpec(o.getLong("id"), o.getDouble("lat"), o.getDouble("lon"), o.getDouble("radius_m"),
+            o.optBoolean("enter", true), o.optBoolean("exit", false), o.optString("name", ""))
+    } catch (e: Exception) { null }
 }

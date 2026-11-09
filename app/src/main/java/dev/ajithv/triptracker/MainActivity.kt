@@ -2,12 +2,15 @@ package dev.ajithv.triptracker
 
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
+import android.location.Address
+import android.location.Geocoder
 import android.net.Uri
 import android.os.Bundle
 import android.view.View
 import android.view.MotionEvent
 import android.view.Gravity
 import android.view.InputDevice
+import android.view.inputmethod.InputMethodManager
 import android.content.Context
 import android.content.res.Configuration
 import android.widget.ArrayAdapter
@@ -30,6 +33,15 @@ import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.tabs.TabLayout
+import com.google.android.gms.maps.model.LatLng
+import com.google.android.libraries.places.api.Places
+import com.google.android.libraries.places.api.model.AutocompletePrediction
+import com.google.android.libraries.places.api.model.AutocompleteSessionToken
+import com.google.android.libraries.places.api.model.Place
+import com.google.android.libraries.places.api.model.RectangularBounds
+import com.google.android.libraries.places.api.net.FetchPlaceRequest
+import com.google.android.libraries.places.api.net.FindAutocompletePredictionsRequest
+import com.google.android.libraries.places.api.net.PlacesClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -37,6 +49,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.maplibre.android.MapLibre
 import org.maplibre.android.maps.MapView
 import java.util.Date
@@ -129,6 +142,37 @@ class MainActivity : AppCompatActivity() {
     private val filterCameras = HashSet<String>()
     private var speedColorOn = false
 
+    // ----- user geofences (device-local alert zones; OS geofencing fires alerts in the background) -----
+    private val geofences = ArrayList<GeofenceSpec>()
+    private var lastRadiusM = 100               // remembered radius for the next add
+    private val REQ_BG_LOC = 7002
+    private val REQ_NOTIF = 7003
+    // placement mode (drag the map under a fixed centre pin; set radius live in a bottom popup)
+    private var placementActive = false
+    private var placementRadiusM = 100.0
+    private var placementEditId: Long? = null   // non-null = editing an existing zone (shows Delete)
+    private var suppressRadiusWatcher = false   // true while the handle drag writes the metres field
+    private lateinit var placementOverlay: PlacementPinView
+    private lateinit var placementPopup: View
+    private lateinit var plRadius: EditText
+    private lateinit var plEnter: android.widget.CheckBox
+    private lateinit var plLeave: android.widget.CheckBox
+    private lateinit var plDelete: Button
+    private lateinit var plName: EditText
+    // ----- place search -----
+    private lateinit var searchButton: ImageButton
+    private lateinit var searchPanel: View
+    private lateinit var searchField: EditText
+    private lateinit var searchResults: LinearLayout
+    private lateinit var searchScroll: MaxHeightScrollView
+    private var searchJob: kotlinx.coroutines.Job? = null
+    private var searchOpen = false
+    private var placesClient: PlacesClient? = null
+    private var mapsKey: String? = null
+    private var searchToken: AutocompleteSessionToken? = null
+    private val searchHistory = ArrayList<SearchHistoryItem>()   // most-recent-first, capped at 100
+    private var searchMarkerLL: LL? = null                       // temporary pin at the last searched place
+
     private var tickN = 0
     private var popupLatLng: LL? = null
     private var gridKey = ""
@@ -183,6 +227,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var pageTrips: View
     private lateinit var pageFilter: View
     private lateinit var pageStart: View
+    private lateinit var pageZones: View
+    private lateinit var zoneSearch: EditText
+    private lateinit var zoneList: LinearLayout
     private lateinit var btnStart: Button
     private lateinit var btnApply: Button
     private lateinit var btnStop: Button
@@ -208,7 +255,10 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         prefs = Prefs(this)
+        initPlaces()
         api = Api(this, prefs)
+        loadGeofences()
+        loadHistory()
         repo = PhotoRepo(api)
         liveStore = LiveStore(this)
         MapLibre.getInstance(this)
@@ -235,6 +285,8 @@ class MainActivity : AppCompatActivity() {
         gCtl.onStyleReady = { renderOn(gCtl) }
         mlCtl.onCameraChanged = { onCamChanged() }
         gCtl.onCameraChanged = { onCamChanged() }
+        mlCtl.onMapLongPress = { lat, lon -> onMapLongPress(lat, lon) }
+        gCtl.onMapLongPress = { lat, lon -> onMapLongPress(lat, lon) }
         // Both MapViews are live at once (only visibility differs) → both get the activity lifecycle.
         // Separate sub-Bundles so the two MapViews' saved state can't collide on shared keys.
         mlCtl.onCreate(savedInstanceState?.getBundle("ml_state"))
@@ -283,6 +335,14 @@ class MainActivity : AppCompatActivity() {
         pageTrips = findViewById(R.id.page_trips)
         pageFilter = findViewById(R.id.page_filter)
         pageStart = findViewById(R.id.page_start)
+        pageZones = findViewById(R.id.page_zones)
+        zoneSearch = findViewById(R.id.zone_search)
+        zoneList = findViewById(R.id.zone_list)
+        zoneSearch.addTextChangedListener(object : android.text.TextWatcher {
+            override fun afterTextChanged(s: android.text.Editable?) { renderZoneList() }
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+        })
         btnStart = findViewById(R.id.btn_start)
         btnApply = findViewById(R.id.btn_apply)
         btnStop = findViewById(R.id.btn_stop)
@@ -299,6 +359,41 @@ class MainActivity : AppCompatActivity() {
         btnCompass = findViewById(R.id.btn_compass)
         btnCompass.setOnClickListener { mapCtl.currentCamera()?.let { c -> mapCtl.moveTo(Cam(c.lat, c.lon, c.zoom, 0.0)) } }
         scaleBar = findViewById(R.id.scale_bar)
+        placementOverlay = findViewById(R.id.placement_overlay)
+        placementPopup = findViewById(R.id.placement_popup)
+        plRadius = findViewById(R.id.pl_radius)
+        plName = findViewById(R.id.pl_name)
+        plEnter = findViewById(R.id.pl_enter); plLeave = findViewById(R.id.pl_leave)
+        plDelete = findViewById(R.id.pl_delete)
+        plDelete.setOnClickListener { deleteEditingGeofence() }
+        findViewById<Button>(R.id.pl_ok).setOnClickListener { confirmPlacement() }
+        findViewById<Button>(R.id.pl_cancel).setOnClickListener { exitPlacement() }
+        plRadius.addTextChangedListener(object : android.text.TextWatcher {
+            override fun afterTextChanged(s: android.text.Editable?) {
+                if (suppressRadiusWatcher) return
+                val v = s?.toString()?.trim()?.toDoubleOrNull()
+                placementRadiusM = if (v != null && v > 0) v else 0.0
+                updatePlacementOverlay()
+            }
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+        })
+        placementOverlay.onRadiusDragPx = { px -> onHandleResize(px) }
+        searchButton = findViewById(R.id.search_button)
+        searchPanel = findViewById(R.id.search_panel)
+        searchField = findViewById(R.id.search_field)
+        searchResults = findViewById(R.id.search_results)
+        searchScroll = findViewById(R.id.search_scroll)
+        searchScroll.maxHeightPx = (resources.displayMetrics.heightPixels * 0.5f).toInt()
+        searchButton.setOnClickListener { openSearch() }
+        findViewById<ImageButton>(R.id.search_close).setOnClickListener { closeSearch() }
+        searchField.addTextChangedListener(object : android.text.TextWatcher {
+            override fun afterTextChanged(s: android.text.Editable?) { onSearchQueryChanged(s?.toString() ?: "") }
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+        })
+        searchField.setOnEditorActionListener { _, _, _ -> onSearchQueryChanged(searchField.text.toString(), true); true }
+        searchField.setOnFocusChangeListener { _, has -> if (has && searchField.text.isNullOrEmpty()) renderHistory() }
 
         // dock geometry (portrait: bottom 44% · landscape: right 40%, like the web app)
         applyDockGeometry()
@@ -348,6 +443,7 @@ class MainActivity : AppCompatActivity() {
         tabs.addTab(tabs.newTab().setText("Trips"))
         tabs.addTab(tabs.newTab().setText("Start"))
         tabs.addTab(tabs.newTab().setText("Filter"))
+        tabs.addTab(tabs.newTab().setText("Zones"))
         tabs.addOnTabSelectedListener(object : TabLayout.OnTabSelectedListener {
             override fun onTabSelected(t: TabLayout.Tab) { showPage(t.position) }
             override fun onTabUnselected(t: TabLayout.Tab) {}
@@ -407,7 +503,9 @@ class MainActivity : AppCompatActivity() {
         pageTrips.visibility = if (pos == 0) View.VISIBLE else View.GONE
         pageStart.visibility = if (pos == 1) View.VISIBLE else View.GONE
         pageFilter.visibility = if (pos == 2) View.VISIBLE else View.GONE
+        pageZones.visibility = if (pos == 3) View.VISIBLE else View.GONE
         if (pos == 2) rebuildFilterOptions()   // always reflect the currently shown photos when opened
+        if (pos == 3) renderZoneList()
     }
 
     private fun simpleSeek(cb: (Int) -> Unit) = object : SeekBar.OnSeekBarChangeListener {
@@ -475,6 +573,7 @@ class MainActivity : AppCompatActivity() {
             mapCtl.setView(h.lat, h.lon, maxOf(mapCtl.zoom(), 16.0))
             centeredTripId = activeTripId
         }
+        refreshZonesFromServer()   // pick up zones created/edited from the web
     }
 
     // ----- trips -----
@@ -718,11 +817,14 @@ class MainActivity : AppCompatActivity() {
         positionPopup(); updateScaleBar(); updateCompass()
         // re-cluster the photos when the zoom changes enough (clustering is screen-distance based)
         if (mapCtl.isReady && photoSorted.isNotEmpty() && kotlin.math.abs(mapCtl.zoom() - lastClusterZoom) > 0.25) renderPhotos()
+        if (placementActive) updatePlacementOverlay()
     }
     private fun renderOn(e: MapEngine) {
         if (!e.isReady) return
         e.renderTracks(views.values, activeTripId, speedColorOn)
         sortPhotos(); e.renderPhotos(clusterPhotos(photoSorted, currentAsset(), e))
+        e.renderGeofences(shownGeofences())
+        searchMarkerLL?.let { e.setSearchMarker(it.lat, it.lon) }
     }
 
     // ----- basemap switching (seamless MapLibre <-> Google) -----
@@ -763,6 +865,8 @@ class MainActivity : AppCompatActivity() {
         gCtl.view.visibility = if (e === gCtl) View.VISIBLE else View.GONE
         positionPopup(); updateScaleBar(); updateCompass()
         e.setSelf(selfLat, selfLon, selfHeading, selfAcc)   // show the orientation cone immediately on the new engine
+        e.renderGeofences(shownGeofences())
+        searchMarkerLL?.let { e.setSearchMarker(it.lat, it.lon) }
         if (mapCtl.isReady && photoSorted.isNotEmpty()) {   // refresh the cluster-tap model for the now-active engine
             lastClusterZoom = mapCtl.zoom(); lastClusters.clear(); lastClusters.addAll(clusterPhotos(photoSorted, currentAsset(), mapCtl))
         }
@@ -778,6 +882,306 @@ class MainActivity : AppCompatActivity() {
         btnCompass.visibility = if (b > 0.5 && b < 359.5) View.VISIBLE else View.GONE
     }
 
+    // ----- place search (framework Geocoder; lens → field → tap a match to centre the map) -----
+    private fun openSearch() {
+        searchOpen = true
+        searchToken = null
+        searchButton.visibility = View.GONE
+        searchPanel.visibility = View.VISIBLE; searchPanel.bringToFront()
+        searchField.setText("")
+        searchField.requestFocus()
+        showHistoryOrClear()
+        (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
+            .showSoftInput(searchField, InputMethodManager.SHOW_IMPLICIT)
+    }
+    private fun closeSearch() {
+        searchOpen = false
+        searchJob?.cancel()
+        (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
+            .hideSoftInputFromWindow(searchField.windowToken, 0)
+        searchPanel.visibility = View.GONE
+        searchResults.removeAllViews(); searchScroll.visibility = View.GONE
+        searchButton.visibility = View.VISIBLE
+    }
+    private fun initPlaces() {
+        try {
+            val ai = packageManager.getApplicationInfo(packageName, android.content.pm.PackageManager.GET_META_DATA)
+            val key = ai.metaData?.getString("com.google.android.geo.API_KEY")
+            if (key.isNullOrBlank() || key == "MISSING_MAPS_KEY") return
+            mapsKey = key
+            if (!Places.isInitialized()) Places.initializeWithNewPlacesApiEnabled(applicationContext, key)
+            placesClient = Places.createClient(this)
+        } catch (e: Exception) { placesClient = null }
+    }
+    private fun clearSearchResults() { searchResults.removeAllViews(); searchScroll.visibility = View.GONE }
+    private fun onSearchQueryChanged(q: String, immediate: Boolean = false) {
+        searchJob?.cancel()
+        val query = q.trim()
+        if (query.isEmpty()) { showHistoryOrClear(); return }
+        if (query.length < 2) { clearSearchResults(); return }
+        val client = placesClient
+        if (client == null) {   // fallback: framework Geocoder (no maps key / Places init failed)
+            searchJob = ui.launch {
+                if (!immediate) delay(300)
+                val results = withContext(Dispatchers.IO) { geocode(query) }
+                if (isActive && searchOpen) renderSearchResults(results)
+            }
+            return
+        }
+        searchJob = ui.launch {
+            if (!immediate) delay(250)
+            if (isActive && searchOpen) requestPredictions(client, query)
+        }
+    }
+    // Google Places Autocomplete (New API). Biased to the current map area; details fetched on tap.
+    private fun requestPredictions(client: PlacesClient, query: String) {
+        val tok = searchToken ?: AutocompleteSessionToken.newInstance().also { searchToken = it }
+        val b = FindAutocompletePredictionsRequest.builder().setSessionToken(tok).setQuery(query)
+        mapCtl.currentCamera()?.let { c ->
+            val d = 0.6
+            b.setLocationBias(RectangularBounds.newInstance(LatLng(c.lat - d, c.lon - d), LatLng(c.lat + d, c.lon + d)))
+        }
+        client.findAutocompletePredictions(b.build())
+            .addOnSuccessListener { resp ->
+                if (searchOpen && searchField.text.toString().trim() == query) renderPredictions(resp.autocompletePredictions)
+            }
+            .addOnFailureListener { renderPredictions(emptyList()) }
+    }
+    private fun renderPredictions(preds: List<AutocompletePrediction>) {
+        searchResults.removeAllViews()
+        if (preds.isEmpty()) { searchScroll.visibility = View.GONE; return }
+        searchScroll.visibility = View.VISIBLE
+        val pad = (12 * resources.displayMetrics.density).toInt()
+        for ((i, p) in preds.withIndex()) {
+            if (i > 0) {
+                val div = View(this)
+                div.layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 1)
+                div.setBackgroundColor(Color.parseColor("#22ffffff")); searchResults.addView(div)
+            }
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL; setPadding(pad, pad, pad, pad); isClickable = true
+                setOnClickListener { pickPrediction(p) }
+            }
+            row.addView(TextView(this).apply {
+                text = p.getPrimaryText(null); setTextColor(Color.parseColor("#e6edf3")); textSize = 14f
+            })
+            val sec = p.getSecondaryText(null)
+            if (!sec.isNullOrEmpty()) row.addView(TextView(this).apply {
+                text = sec; setTextColor(Color.parseColor("#9aa5b1")); textSize = 12f
+            })
+            searchResults.addView(row)
+        }
+    }
+    private fun pickPrediction(p: AutocompletePrediction) {
+        val client = placesClient ?: return
+        val label = p.getPrimaryText(null).toString()
+        val sec = p.getSecondaryText(null)?.toString() ?: ""
+        val req = FetchPlaceRequest.builder(p.placeId, listOf(Place.Field.LAT_LNG)).setSessionToken(searchToken).build()
+        client.fetchPlace(req)
+            .addOnSuccessListener { resp -> resp.place.latLng?.let { addHistory(label, sec, it.latitude, it.longitude); mapCtl.setView(it.latitude, it.longitude, maxOf(mapCtl.zoom(), 15.0)); showSearchMarker(it.latitude, it.longitude) } }
+            .addOnFailureListener { toast("Couldn't open that place") }
+        searchToken = null   // end the autocomplete session
+        closeSearch()
+    }
+    private fun geocode(q: String): List<Address> = try {
+        if (!Geocoder.isPresent()) emptyList()
+        else @Suppress("DEPRECATION") (Geocoder(this).getFromLocationName(q, 6) ?: emptyList())
+    } catch (e: Exception) { emptyList() }
+    private fun renderSearchResults(addrs: List<Address>) {
+        searchResults.removeAllViews()
+        if (addrs.isEmpty()) { searchScroll.visibility = View.GONE; return }
+        searchScroll.visibility = View.VISIBLE
+        val pad = (12 * resources.displayMetrics.density).toInt()
+        for ((i, a) in addrs.withIndex()) {
+            if (i > 0) {
+                val div = View(this)
+                div.layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 1)
+                div.setBackgroundColor(Color.parseColor("#22ffffff")); searchResults.addView(div)
+            }
+            val label = a.getAddressLine(0)
+                ?: listOfNotNull(a.featureName, a.locality, a.adminArea, a.countryName).distinct().joinToString(", ")
+            val tv = TextView(this).apply {
+                text = label; setTextColor(Color.parseColor("#e6edf3")); textSize = 14f
+                setPadding(pad, pad, pad, pad); isClickable = true
+                setOnClickListener { pickSearchResult(a) }
+            }
+            searchResults.addView(tv)
+        }
+    }
+    private fun pickSearchResult(a: Address) {
+        val label = a.getAddressLine(0)
+            ?: listOfNotNull(a.featureName, a.locality, a.adminArea, a.countryName).distinct().joinToString(", ")
+        addHistory(label, "", a.latitude, a.longitude)
+        mapCtl.setView(a.latitude, a.longitude, maxOf(mapCtl.zoom(), 15.0))
+        showSearchMarker(a.latitude, a.longitude)
+        closeSearch()
+    }
+
+    // ----- tapped-place history (persisted, newest first, ≤100, scrollable, per-row delete) -----
+    private data class SearchHistoryItem(val label: String, val secondary: String, val lat: Double, val lon: Double)
+    private fun showHistoryOrClear() {
+        if (searchOpen && searchField.text.isNullOrEmpty() && searchField.hasFocus()) renderHistory() else clearSearchResults()
+    }
+    private fun renderHistory() {
+        searchResults.removeAllViews()
+        if (searchHistory.isEmpty()) { searchScroll.visibility = View.GONE; return }
+        searchScroll.visibility = View.VISIBLE
+        val pad = (12 * resources.displayMetrics.density).toInt()
+        for ((i, h) in searchHistory.withIndex()) {
+            if (i > 0) {
+                val div = View(this)
+                div.layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 1)
+                div.setBackgroundColor(Color.parseColor("#22ffffff")); searchResults.addView(div)
+            }
+            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+            val col = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL; isClickable = true; isFocusable = false
+                setPadding(pad, pad, pad, pad)
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                setOnClickListener { pickHistory(h) }
+            }
+            col.addView(TextView(this).apply { text = h.label; setTextColor(Color.parseColor("#e6edf3")); textSize = 14f })
+            if (h.secondary.isNotEmpty()) col.addView(TextView(this).apply { text = h.secondary; setTextColor(Color.parseColor("#9aa5b1")); textSize = 12f })
+            row.addView(col)
+            val x = ImageButton(this).apply {
+                setImageResource(R.drawable.ic_x); background = null; isFocusable = false
+                val s = (40 * resources.displayMetrics.density).toInt()
+                layoutParams = LinearLayout.LayoutParams(s, s)
+                setColorFilter(Color.parseColor("#9aa5b1"))
+                contentDescription = "Remove from history"
+                setOnClickListener { deleteHistory(h) }
+            }
+            row.addView(x)
+            searchResults.addView(row)
+        }
+    }
+    private fun pickHistory(h: SearchHistoryItem) {
+        addHistory(h.label, h.secondary, h.lat, h.lon)   // bump to most recent
+        mapCtl.setView(h.lat, h.lon, maxOf(mapCtl.zoom(), 15.0))
+        showSearchMarker(h.lat, h.lon)
+        closeSearch()
+    }
+    private fun deleteHistory(h: SearchHistoryItem) { searchHistory.remove(h); saveHistory(); renderHistory() }
+    private fun addHistory(label: String, secondary: String, lat: Double, lon: Double) {
+        searchHistory.removeAll { it.label == label }
+        searchHistory.add(0, SearchHistoryItem(label, secondary, lat, lon))
+        while (searchHistory.size > 100) searchHistory.removeAt(searchHistory.size - 1)
+        saveHistory()
+    }
+    private fun loadHistory() {
+        searchHistory.clear()
+        try {
+            val arr = org.json.JSONArray(prefs.historyJson)
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                searchHistory.add(SearchHistoryItem(o.getString("label"), o.optString("sec", ""), o.getDouble("lat"), o.getDouble("lon")))
+            }
+        } catch (e: Exception) {}
+    }
+    private fun saveHistory() {
+        val arr = org.json.JSONArray()
+        for (h in searchHistory) arr.put(org.json.JSONObject().put("label", h.label).put("sec", h.secondary).put("lat", h.lat).put("lon", h.lon))
+        prefs.historyJson = arr.toString()
+    }
+    private fun showSearchMarker(lat: Double, lon: Double) { searchMarkerLL = LL(lat, lon); mapCtl.setSearchMarker(lat, lon) }
+    private fun clearSearchMarker() { if (searchMarkerLL != null) { searchMarkerLL = null; mapCtl.setSearchMarker(null, null) } }
+
+    // ----- Zones tab: searchable list of alert zones -----
+    private fun zoneDisplayName(g: GeofenceSpec): String =
+        g.name.ifBlank { String.format(java.util.Locale.US, "%.4f, %.4f", g.lat, g.lon) }
+    private fun renderZoneList() {
+        if (!::zoneList.isInitialized) return
+        zoneList.removeAllViews()
+        val pad = (10 * resources.displayMetrics.density).toInt()
+        val q = (zoneSearch.text?.toString() ?: "").trim().lowercase()
+        val items = geofences
+            .filter { q.isEmpty() || zoneDisplayName(it).lowercase().contains(q) }
+            .sortedBy { zoneDisplayName(it).lowercase() }
+        if (items.isEmpty()) {
+            zoneList.addView(TextView(this).apply {
+                text = if (geofences.isEmpty()) "No alert zones yet" else "No matches"
+                setTextColor(Color.parseColor("#9aa5b1")); setPadding(pad, pad, pad, pad)
+            })
+            return
+        }
+        for (g in items) {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL; isClickable = true; setPadding(pad, pad, pad, pad)
+                setOnClickListener { onZonePicked(g) }
+            }
+            row.addView(TextView(this).apply { text = zoneDisplayName(g); setTextColor(Color.parseColor("#e6edf3")); textSize = 15f })
+            val flags = when { g.enter && g.exit -> "enter + leave"; g.exit -> "leave"; else -> "enter" }
+            row.addView(TextView(this).apply { text = "${g.radiusM.toInt()} m · $flags"; setTextColor(Color.parseColor("#9aa5b1")); textSize = 12f })
+            zoneList.addView(row)
+            val div = View(this)
+            div.layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 1)
+            div.setBackgroundColor(Color.parseColor("#22ffffff")); zoneList.addView(div)
+        }
+    }
+    private fun onZonePicked(g: GeofenceSpec) {
+        mapCtl.setView(g.lat, g.lon, maxOf(mapCtl.zoom(), 15.0))
+        drawer.closeDrawers()
+    }
+    // Fill a blank zone name from reverse geocoding (short component of the address).
+    private fun generateZoneName(id: Long, lat: Double, lon: Double) {
+        ui.launch {
+            val n = withContext(Dispatchers.IO) { reverseGeocodeShort(lat, lon) }
+            if (n.isEmpty()) return@launch
+            val idx = geofences.indexOfFirst { it.id == id }
+            if (idx >= 0 && (geofences[idx].name.isEmpty() || looksLikePlusCode(geofences[idx].name))) {
+                geofences[idx] = geofences[idx].copy(name = n)
+                saveGeofences()
+                runCatching { api.zoneUpdate(id, null, null, null, null, null, n) }   // persist to the DB
+            }
+        }
+    }
+    private fun reverseGeocodeShort(lat: Double, lon: Double): String {
+        mapsKey?.let { val r = reverseGeocodeRest(lat, lon, it); if (r.isNotEmpty()) return r }
+        return try {
+            if (!Geocoder.isPresent()) ""
+            else {
+                val a = @Suppress("DEPRECATION") Geocoder(this).getFromLocation(lat, lon, 1)?.firstOrNull()
+                if (a == null) "" else shortNameFrom(a)
+            }
+        } catch (e: Exception) { "" }
+    }
+    // Reverse geocode via the Geocoding API → the best short PLACE name (POI/neighbourhood/locality),
+    // skipping Plus Codes. Called from Dispatchers.IO (does blocking network).
+    private fun reverseGeocodeRest(lat: Double, lon: Double, key: String): String = try {
+        val url = "https://maps.googleapis.com/maps/api/geocode/json?latlng=$lat,$lon&key=$key"
+        val conn = (java.net.URL(url).openConnection() as java.net.HttpURLConnection).apply {
+            connectTimeout = 8000; readTimeout = 8000
+        }
+        val txt = conn.inputStream.bufferedReader().use { it.readText() }
+        val json = org.json.JSONObject(txt)
+        if (json.optString("status") != "OK") "" else {
+            val results = json.getJSONArray("results")
+            val priority = listOf("point_of_interest", "premise", "establishment", "tourist_attraction",
+                "park", "natural_feature", "neighborhood", "sublocality_level_1", "sublocality",
+                "locality", "administrative_area_level_3", "administrative_area_level_2")
+            var found = ""
+            outer@ for (type in priority) {
+                for (ri in 0 until results.length()) {
+                    val comps = results.getJSONObject(ri).optJSONArray("address_components") ?: continue
+                    for (ci in 0 until comps.length()) {
+                        val comp = comps.getJSONObject(ci)
+                        val types = comp.optJSONArray("types") ?: continue
+                        for (ti in 0 until types.length()) if (types.getString(ti) == type) { found = comp.getString("long_name"); break@outer }
+                    }
+                }
+            }
+            found
+        }
+    } catch (e: Exception) { "" }
+    private fun shortNameFrom(a: Address): String {
+        fun ok(s: String?) = !s.isNullOrBlank() && !s.contains("+") && s.any { it.isLetter() }
+        for (v in listOf(a.premises, a.subLocality, a.locality, a.thoroughfare, a.subAdminArea, a.adminArea))
+            if (ok(v)) return v!!
+        if (ok(a.featureName)) return a.featureName
+        return a.getAddressLine(0)?.split(",")?.map { it.trim() }?.firstOrNull { ok(it) } ?: ""
+    }
+    private fun looksLikePlusCode(s: String) = s.matches(Regex("[A-Za-z0-9]{2,8}\\+[A-Za-z0-9]{2,4}"))
+
     private fun openPhoto(key: Any, fullscreen: Boolean, fromSwipe: Boolean = false) {
         sortPhotos()
         if (photoSorted.isEmpty()) return
@@ -785,6 +1189,7 @@ class MainActivity : AppCompatActivity() {
         if (i < 0) i = 0
         curPhoto = i.coerceIn(0, photoSorted.size - 1)
         val p = photoSorted[curPhoto]
+        mapCtl.centerOn(p.lat, p.lon, true)   // pan to follow the shown photo (zoom kept)
         renderPhotos()
         showDock(p)
         if (fullscreen) showFullscreen(p)
@@ -862,9 +1267,13 @@ class MainActivity : AppCompatActivity() {
     private fun applyLandscapeSplit() {
         val land = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
         val open = dockOpen && dock.visibility == View.VISIBLE
-        val m = if (land && open) (dock.layoutParams?.width ?: 0) else 0
+        // shrink the map region (map + its buttons) to the space NOT covered by the dock, so the map centre =
+        // the visible-area centre (auto-pan lands the photo in the middle of the visible map, like the web).
+        // landscape: dock is the right 40% -> rightMargin; portrait: dock is the bottom 44% -> bottomMargin.
+        val rm = if (land && open) (dock.layoutParams?.width ?: 0) else 0
+        val bm = if (!land && open) (dock.layoutParams?.height ?: 0) else 0
         val lp = mapwrap.layoutParams as FrameLayout.LayoutParams
-        if (lp.rightMargin != m) { lp.rightMargin = m; mapwrap.layoutParams = lp }
+        if (lp.rightMargin != rm || lp.bottomMargin != bm) { lp.rightMargin = rm; lp.bottomMargin = bm; mapwrap.layoutParams = lp }
     }
 
     // Dock geometry: portrait = bottom 44% (full width); landscape = right 40% (full height), mirroring the
@@ -1843,6 +2252,7 @@ class MainActivity : AppCompatActivity() {
 
     // ----- track balloon (anchored to the point, moves with the map) -----
     private fun onMapTap(lat: Double, lon: Double) {
+        if (placementActive) return
         if (editMode) { handleEditTap(lat, lon); return }
         if (gridOpen || fsOpen) { popupLatLng = null; trackPopup.visibility = View.GONE; return }
         val tapS = mapCtl.screenOf(lat, lon) ?: run { popupLatLng = null; trackPopup.visibility = View.GONE; return }
@@ -1924,6 +2334,189 @@ class MainActivity : AppCompatActivity() {
         var d = 0.0; var k = 1
         while (k <= idx && k < v.pts.size) { d += Geo.haversine(v.pts[k-1].lat, v.pts[k-1].lon, v.pts[k].lat, v.pts[k].lon); k++ }
         return d
+    }
+
+    // ===================== user geofences (alert zones) =====================
+    // Zones live in the add-on DB (shared with the web). Load the local CACHE first for instant display +
+    // offline alerting, then sync the authoritative set from the server.
+    private fun loadGeofences() {
+        geofences.clear()
+        try {
+            val arr = org.json.JSONArray(prefs.geofencesJson)
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                geofences.add(GeofenceSpec(o.getLong("id"), o.getDouble("lat"), o.getDouble("lon"), o.getDouble("r"),
+                    o.optBoolean("enter", true), o.optBoolean("exit", false), o.optString("name", "")))
+            }
+        } catch (e: Exception) { /* corrupt cache → start empty */ }
+        GeofenceController.register(this, geofences)
+        refreshZonesFromServer()
+    }
+    private fun zoneSig(g: GeofenceSpec) = "${g.lat},${g.lon},${g.radiusM},${g.enter},${g.exit},${g.name}"
+    // Pull the authoritative zones from the add-on DB. First run migrates local-only zones up to the DB.
+    private fun refreshZonesFromServer() {
+        if (!::api.isInitialized) return
+        ui.launch {
+            val server = runCatching { api.zones() }.getOrNull() ?: return@launch   // offline → keep the cache
+            if (!prefs.zonesMigrated) {
+                if (server.isEmpty() && geofences.isNotEmpty())
+                    for (g in geofences.toList()) runCatching { api.zoneCreate(g.lat, g.lon, g.radiusM, g.enter, g.exit, g.name) }
+                prefs.zonesMigrated = true
+                refreshZonesFromServer()   // re-fetch with migration applied
+                return@launch
+            }
+            if (placementActive) return@launch   // don't clobber an in-progress edit
+            val same = server.map { it.id to zoneSig(it) }.toSet() == geofences.map { it.id to zoneSig(it) }.toSet()
+            if (!same) {
+                geofences.clear(); geofences.addAll(server)
+                saveGeofences(); renderGeofences()   // cache + re-register OS geofences + refresh the list
+                for (g in geofences) if (looksLikePlusCode(g.name)) generateZoneName(g.id, g.lat, g.lon)
+            }
+        }
+    }
+    private fun saveGeofences() {
+        val arr = org.json.JSONArray()
+        for (g in geofences) arr.put(org.json.JSONObject().put("id", g.id).put("lat", g.lat).put("lon", g.lon).put("r", g.radiusM)
+            .put("enter", g.enter).put("exit", g.exit).put("name", g.name))
+        prefs.geofencesJson = arr.toString()
+        GeofenceController.register(this, geofences)   // keep the OS registration in sync
+        renderZoneList()                               // keep the Zones tab list in sync (source: `geofences`)
+    }
+    // While editing a zone, hide it from the committed layer so only the editable overlay represents it.
+    private fun shownGeofences(): List<GeofenceSpec> =
+        if (placementEditId == null) geofences else geofences.filter { it.id != placementEditId }
+    private fun renderGeofences() { if (mapCtl.isReady) mapCtl.renderGeofences(shownGeofences()) }
+
+    // Long-press: on an existing placemark → offer to delete it; on empty map → prompt a radius and add one.
+    private fun onMapLongPress(lat: Double, lon: Double) {
+        if (editMode || gridOpen || fsOpen || placementActive) return
+        val tapS = mapCtl.screenOf(lat, lon)
+        val sm = searchMarkerLL
+        if (sm != null && tapS != null) {   // long-press the search pin → new zone there (pin cleared in enterPlacement)
+            val s = mapCtl.screenOf(sm.lat, sm.lon)
+            if (s != null && hypot((tapS.x - s.x).toDouble(), (tapS.y - s.y).toDouble()) <= 44f * resources.displayMetrics.density) {
+                enterPlacement(sm.lat, sm.lon); return
+            }
+        }
+        if (tapS != null) {
+            val hitPx = 28f * resources.displayMetrics.density
+            var best: GeofenceSpec? = null; var bestD = Float.MAX_VALUE
+            for (g in geofences) {
+                val s = mapCtl.screenOf(g.lat, g.lon) ?: continue
+                val d = hypot((tapS.x - s.x).toDouble(), (tapS.y - s.y).toDouble()).toFloat()
+                if (d < bestD) { bestD = d; best = g }
+            }
+            if (best != null && bestD <= hitPx) { enterPlacement(best.lat, best.lon, best); return }
+        }
+        enterPlacement(lat, lon)
+    }
+
+    // Enter placement: show the bottom popup + the fixed centre pin, and pan so the tapped point is centred
+    // in the visible area (above the popup). The user then drags/zooms the map under the pin.
+    private fun enterPlacement(lat: Double, lon: Double, editing: GeofenceSpec? = null) {
+        if (placementActive) return
+        placementActive = true
+        clearSearchMarker()
+        placementEditId = editing?.id
+        placementRadiusM = editing?.radiusM ?: lastRadiusM.toDouble()
+        plRadius.setText(placementRadiusM.toInt().toString()); plRadius.setSelection(plRadius.text.length)
+        plEnter.isChecked = editing?.enter ?: true; plLeave.isChecked = editing?.exit ?: false
+        plDelete.visibility = if (editing != null) View.VISIBLE else View.GONE
+        plName.setText(editing?.name ?: "")
+        renderGeofences()   // hide the zone being edited from the committed layer (only the overlay shows it)
+        placementPopup.visibility = View.VISIBLE; placementPopup.bringToFront()
+        placementOverlay.visibility = View.VISIBLE; placementOverlay.bringToFront(); placementOverlay.active = true
+        placementPopup.post {
+            val ph = placementPopup.height
+            placementOverlay.bottomInsetPx = ph.toFloat()
+            // Pan so the zone centre lands EXACTLY under the pin (visible-area centre, above the popup). A pan
+            // at fixed zoom is a pure screen translation, so this is exact: targetScreen = screenOf(zone) +
+            // screenOf(currentTarget) − pin.
+            val px = mapCtl.view.width / 2f
+            val py = (mapCtl.view.height - ph) / 2f
+            val sZone = mapCtl.screenOf(lat, lon)
+            val sTgt = mapCtl.currentCamera()?.let { mapCtl.screenOf(it.lat, it.lon) }
+            val tgt = if (sZone != null && sTgt != null) mapCtl.fromScreen(sZone.x + sTgt.x - px, sZone.y + sTgt.y - py) else null
+            if (tgt != null) mapCtl.setView(tgt.lat, tgt.lon, mapCtl.zoom())
+            else mapCtl.setView(lat, lon, mapCtl.zoom())
+            updatePlacementOverlay()
+        }
+    }
+    private fun exitPlacement() {
+        placementActive = false
+        placementEditId = null
+        placementOverlay.active = false; placementOverlay.visibility = View.GONE
+        placementPopup.visibility = View.GONE
+        renderGeofences()   // restore the full committed set (unhide the edited zone / reflect edits)
+    }
+    // Circle radius on screen = ground radius / metres-per-pixel, so it tracks zoom and holds its real size.
+    private fun updatePlacementOverlay() {
+        if (!placementActive) return
+        val mpp = mapCtl.metersPerPixel()
+        placementOverlay.radiusPx = if (mpp != null && mpp > 0) (placementRadiusM / mpp).toFloat() else 0f
+    }
+    // Dragging the circle's edge knob → new ground radius = knob distance (px) × metres-per-pixel; the
+    // overlay already redrew itself live, so this just syncs the metres value + the popup's number field.
+    private fun onHandleResize(px: Float) {
+        val mpp = mapCtl.metersPerPixel() ?: return
+        placementRadiusM = (px * mpp).coerceAtLeast(1.0)
+        suppressRadiusWatcher = true
+        plRadius.setText(placementRadiusM.toInt().toString()); plRadius.setSelection(plRadius.text.length)
+        suppressRadiusWatcher = false
+    }
+    // OK: the zone centre is the geo point under the pin (visible-area centre), radius is the current value.
+    private fun confirmPlacement() {
+        val ph = placementPopup.height
+        val cx = mapCtl.view.width / 2f
+        val cy = (mapCtl.view.height - ph) / 2f
+        val c = mapCtl.fromScreen(cx, cy) ?: mapCtl.currentCamera()?.let { LL(it.lat, it.lon) }
+        if (c == null) { toast("Map not ready"); return }
+        val r = placementRadiusM
+        if (r <= 0) { toast("Enter a radius > 0"); return }
+        val enter = plEnter.isChecked; val exit = plLeave.isChecked
+        if (!enter && !exit) { toast("Choose entering, leaving, or both"); return }
+        lastRadiusM = r.toInt()
+        val name = plName.text.toString().trim()
+        val editId = placementEditId
+        ensureGeofencePermissions()
+        exitPlacement()
+        ui.launch {   // persist to the add-on DB (the source of truth), then apply locally
+            val spec = runCatching {
+                if (editId != null) api.zoneUpdate(editId, c.lat, c.lon, r, enter, exit, name)
+                else api.zoneCreate(c.lat, c.lon, r, enter, exit, name)
+            }.getOrNull()
+            if (spec == null) { toast("Couldn't save the zone"); return@launch }
+            val idx = geofences.indexOfFirst { it.id == spec.id }
+            if (idx >= 0) geofences[idx] = spec else geofences.add(spec)
+            saveGeofences(); renderGeofences()
+            if (spec.name.isEmpty()) generateZoneName(spec.id, spec.lat, spec.lon)
+        }
+        toast((if (editId != null) "Alert zone updated" else "Alert zone added") + " (${r.toInt()} m)")
+    }
+
+    private fun deleteEditingGeofence() {
+        val editId = placementEditId ?: return
+        exitPlacement()
+        geofences.removeAll { it.id == editId }
+        saveGeofences(); renderGeofences()
+        ui.launch { runCatching { api.zoneDelete(editId) } }   // remove from the add-on DB
+        toast("Alert zone deleted")
+    }
+
+    // Background alerts need “Allow all the time” location (API 29+) and notifications (API 33+).
+    private fun ensureGeofencePermissions() {
+        if (android.os.Build.VERSION.SDK_INT >= 33 &&
+            androidx.core.content.ContextCompat.checkSelfPermission(this, android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED)
+            androidx.core.app.ActivityCompat.requestPermissions(this, arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), REQ_NOTIF)
+        if (android.os.Build.VERSION.SDK_INT >= 29 &&
+            androidx.core.content.ContextCompat.checkSelfPermission(this, android.Manifest.permission.ACCESS_BACKGROUND_LOCATION) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            AlertDialog.Builder(this)
+                .setTitle("Background alerts")
+                .setMessage("To alert you when you enter a zone while the app is closed, set location to \u201CAllow all the time\u201D on the next screen.")
+                .setPositiveButton("OK") { _, _ -> androidx.core.app.ActivityCompat.requestPermissions(this, arrayOf(android.Manifest.permission.ACCESS_BACKGROUND_LOCATION), REQ_BG_LOC) }
+                .setNegativeButton("Not now", null)
+                .show()
+        }
     }
 
     // ----- locate / follow -----
@@ -2127,6 +2720,8 @@ class MainActivity : AppCompatActivity() {
     // ----- lifecycle -----
     override fun onBackPressed() {
         when {
+            searchOpen -> closeSearch()
+            placementActive -> exitPlacement()
             editMode -> exitTrackEdit()
             fsOpen -> closeFullscreen()
             chartFullOpen -> closeChartFull()
@@ -2146,6 +2741,7 @@ class MainActivity : AppCompatActivity() {
         super.onRequestPermissionsResult(req, perms, res)
         if (req == REQ_LOC && res.isNotEmpty() && res[0] == android.content.pm.PackageManager.PERMISSION_GRANTED)
             selfLoc.start()   // begin location now that it's granted
+        if (req == REQ_BG_LOC) GeofenceController.register(this, geofences)   // now effective in the background
     }
     override fun onStop() { mlCtl.onStop(); gCtl.onStop(); super.onStop() }
     override fun onLowMemory() { super.onLowMemory(); mlCtl.onLowMemory(); gCtl.onLowMemory() }

@@ -25,6 +25,10 @@ import org.maplibre.android.plugins.annotation.LineManager
 import org.maplibre.android.plugins.annotation.LineOptions
 import org.maplibre.android.plugins.annotation.SymbolManager
 import org.maplibre.android.plugins.annotation.SymbolOptions
+import org.maplibre.android.style.layers.Property
+import org.maplibre.android.plugins.annotation.Fill
+import org.maplibre.android.plugins.annotation.FillManager
+import org.maplibre.android.plugins.annotation.FillOptions
 import org.maplibre.android.utils.ColorUtils
 
 /** MapLibre (keyless) renderer: vector/raster basemaps, tracks (gap-split, per-trip or speed colour),
@@ -48,7 +52,12 @@ class MapController(
     private var headDotMgr: CircleManager? = null  // moving head dot (own layer → cleared without touching start/end)
     private var replayMgr: CircleManager? = null   // trip-replay scrubber marker
     private var editMgr: CircleManager? = null     // draggable edit handles (selected points)
+    private var searchMgr: SymbolManager? = null   // temporary search-result pin
+    private var geoFillMgr: FillManager? = null    // geofence circle fills (0.3 red)
+    private var geoLineMgr: LineManager? = null    // geofence circle outlines (dark red)
+    private var geoDotMgr: CircleManager? = null   // geofence centre placemarks
     override var onEditDragEnd: ((Long, Double, Double) -> Unit)? = null
+    override var onMapLongPress: ((Double, Double) -> Unit)? = null
     // live-trip incremental-append state (set by renderTracks, consumed by appendLive)
     private var liveTripId: Int? = null
     private var liveTail: Line? = null             // the polyline new points extend; null if not cleanly extendable
@@ -84,6 +93,7 @@ class MapController(
                 if (reason == MapLibreMap.OnCameraMoveStartedListener.REASON_API_GESTURE) onUserGesture()
             }
             m.addOnMapClickListener { ll -> onMapTap(ll.latitude, ll.longitude); false }
+            m.addOnMapLongClickListener { ll -> onMapLongPress?.invoke(ll.latitude, ll.longitude); true }
             m.addOnCameraMoveListener { onCameraChanged?.invoke() }
             m.addOnCameraIdleListener { onCameraChanged?.invoke() }
             setBasemap(basemapKey) { onReady() }
@@ -98,6 +108,9 @@ class MapController(
         m.setStyle(builder) { st ->
             style = st
             destroyManagers()
+            geoFillMgr = FillManager(mapView, m, st)     // geofences at the bottom (under tracks/photos)
+            geoLineMgr = LineManager(mapView, m, st)
+            geoDotMgr = CircleManager(mapView, m, st)
             lineMgr = LineManager(mapView, m, st)
             fillDotMgr = CircleManager(mapView, m, st)   // created after lineMgr → fill dots draw on top of the line
             decorMgr = CircleManager(mapView, m, st)
@@ -116,6 +129,7 @@ class MapController(
                     onEditDragEnd?.invoke(id, a.latLng.latitude, a.latLng.longitude)
                 }
             })
+            searchMgr = SymbolManager(mapView, m, st).apply { iconAllowOverlap = true; iconIgnorePlacement = true }
             liveTripId = null; liveTail = null; liveTailBand = -1; liveCount = 0
             // No annotation click listeners: every tap goes through onMapTap, which does dot-first hit-testing
             // (so a tap near a dot selects the nearest dot, not the track, and shows no balloon).
@@ -125,8 +139,9 @@ class MapController(
     }
 
     private fun destroyManagers() {
+        searchMgr?.onDestroy(); editMgr?.onDestroy(); geoDotMgr?.onDestroy(); geoLineMgr?.onDestroy(); geoFillMgr?.onDestroy()
         replayMgr?.onDestroy(); headDotMgr?.onDestroy(); headMgr?.onDestroy(); clusterMgr?.onDestroy(); curDotMgr?.onDestroy(); photoMgr?.onDestroy(); decorMgr?.onDestroy(); lineMgr?.onDestroy()
-        editMgr = null; replayMgr = null; headDotMgr = null; headMgr = null; clusterMgr = null; curDotMgr = null; photoMgr = null; decorMgr = null; fillDotMgr = null; lineMgr = null
+        searchMgr = null; editMgr = null; geoDotMgr = null; geoLineMgr = null; geoFillMgr = null; replayMgr = null; headDotMgr = null; headMgr = null; clusterMgr = null; curDotMgr = null; photoMgr = null; decorMgr = null; fillDotMgr = null; lineMgr = null
         liveTail = null; liveTripId = null
     }
 
@@ -136,6 +151,14 @@ class MapController(
         if (lat == null || lon == null) return
         cm.create(CircleOptions().withLatLng(LatLng(lat, lon)).withCircleRadius(9f)
             .withCircleColor("#ff6d00").withCircleStrokeColor("#ffffff").withCircleStrokeWidth(2.5f))
+    }
+    override fun setSearchMarker(lat: Double?, lon: Double?) {
+        val sm = searchMgr ?: return; val st = style ?: return
+        sm.deleteAll()
+        if (lat == null || lon == null) return
+        st.addImage("tt-searchpin", MarkerBitmaps.pin(density))
+        sm.create(SymbolOptions().withLatLng(LatLng(lat, lon)).withIconImage("tt-searchpin")
+            .withIconAnchor(Property.ICON_ANCHOR_BOTTOM).withIconSize(1f))
     }
 
     // ---- tracks ----
@@ -295,6 +318,18 @@ class MapController(
         }
     }
 
+    override fun renderGeofences(specs: List<GeofenceSpec>) {
+        val fm = geoFillMgr ?: return; val lm = geoLineMgr ?: return; val dm = geoDotMgr ?: return
+        fm.deleteAll(); lm.deleteAll(); dm.deleteAll()
+        for (g in specs) {
+            val ring = Geo.circlePolygon(g.lat, g.lon, g.radiusM).map { LatLng(it.lat, it.lon) }
+            fm.create(FillOptions().withLatLngs(listOf(ring)).withFillColor("#ff0000").withFillOpacity(0.3f))
+            lm.create(LineOptions().withLatLngs(ring).withLineColor("#8b0000").withLineWidth(2f).withLineOpacity(0.95f))
+            dm.create(CircleOptions().withLatLng(LatLng(g.lat, g.lon)).withCircleRadius(6f)
+                .withCircleColor("#8b0000").withCircleStrokeColor("#ffffff").withCircleStrokeWidth(2f))
+        }
+    }
+
     // ---- camera ----
     override fun setEditPoints(pts: List<EditPt>) {
         val em = editMgr ?: return
@@ -316,6 +351,10 @@ class MapController(
         return m.projection.getMetersPerPixelAtLatitude(lat)
     }
     override fun screenOf(lat: Double, lon: Double): PointF? = map?.projection?.toScreenLocation(LatLng(lat, lon))
+    override fun fromScreen(x: Float, y: Float): LL? {
+        val ll = map?.projection?.fromScreenLocation(PointF(x, y)) ?: return null
+        return LL(ll.latitude, ll.longitude)
+    }
     override fun centerOn(lat: Double, lon: Double, animate: Boolean) {
         val m = map ?: return
         val upd = CameraUpdateFactory.newLatLng(LatLng(lat, lon))

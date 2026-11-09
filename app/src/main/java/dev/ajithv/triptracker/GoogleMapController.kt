@@ -52,6 +52,7 @@ class GoogleMapController(
     private val clusterMarkers = ArrayList<Marker>()
     private val editMarkers = ArrayList<Marker>()   // draggable edit handles (selected points)
     override var onEditDragEnd: ((Long, Double, Double) -> Unit)? = null
+    override var onMapLongPress: ((Double, Double) -> Unit)? = null
     private var curDot: Marker? = null
     // live-trip incremental-append state (set by renderTracks, consumed by appendLive)
     private var liveTripId: Int? = null
@@ -65,6 +66,11 @@ class GoogleMapController(
     private var selfDotBmp: Bitmap? = null
     private var replayMarker: Marker? = null  // trip-replay scrubber marker
     private var replayBmp: Bitmap? = null
+    private val geoCircles = ArrayList<Circle>()   // geofence circles (metre radius)
+    private val geoMarkers = ArrayList<Marker>()   // geofence centre placemarks
+    private var geoDotBmp: Bitmap? = null
+    private var searchMarker: Marker? = null
+    private var searchPinBmp: Bitmap? = null
 
     override fun init(centerLat: Double, centerLon: Double, zoom: Int, basemapKey: String, onReady: () -> Unit) {
         MapsInitializer.initialize(mapView.context)
@@ -80,6 +86,7 @@ class GoogleMapController(
             gm.setPadding(0, (118f * density).toInt(), 0, (76f * density).toInt())
             gm.moveCamera(CameraUpdateFactory.newLatLngZoom(LatLng(centerLat, centerLon), zoom.toFloat()))
             gm.setOnMapClickListener { ll -> onMapTap(ll.latitude, ll.longitude) }
+            gm.setOnMapLongClickListener { ll -> onMapLongPress?.invoke(ll.latitude, ll.longitude) }
             // Google routes a tap that lands ON a marker to the marker listener (NOT onMapClick) and
             // consumes it, so photo-dot/track-marker taps must be forwarded into the same hit-test as a
             // tap at the marker's position. Returning true suppresses Google's default info-window + recenter.
@@ -248,6 +255,19 @@ class GoogleMapController(
         }
     }
 
+    override fun renderGeofences(specs: List<GeofenceSpec>) {
+        val gm = map ?: return
+        geoCircles.forEach { it.remove() }; geoCircles.clear()
+        geoMarkers.forEach { it.remove() }; geoMarkers.clear()
+        if (geoDotBmp == null) geoDotBmp = dotBitmap(6f, Color.parseColor("#8b0000"), Color.WHITE, 2f)
+        for (g in specs) {
+            gm.addCircle(CircleOptions().center(LatLng(g.lat, g.lon)).radius(g.radiusM)
+                .strokeColor(Color.parseColor("#8b0000")).strokeWidth(2f * density)
+                .fillColor(0x4DFF0000).zIndex(0.5f))?.let { geoCircles.add(it) }
+            addMarker(gm, g.lat, g.lon, geoDotBmp!!, 2f)?.let { geoMarkers.add(it) }
+        }
+    }
+
     // ---- self location + heading cone (Google-Maps-style orientation "flashlight") ----
     override fun setSelf(lat: Double?, lon: Double?, headingDeg: Float?, accuracyM: Float?) {
         val gm = map ?: return
@@ -315,6 +335,16 @@ class GoogleMapController(
             .icon(BitmapDescriptorFactory.fromBitmap(replayBmp!!)).anchor(0.5f, 0.5f).flat(true).zIndex(9f))
         else m.position = pos
     }
+    override fun setSearchMarker(lat: Double?, lon: Double?) {
+        val gm = map ?: return
+        if (lat == null || lon == null) { searchMarker?.remove(); searchMarker = null; return }
+        if (searchPinBmp == null) searchPinBmp = MarkerBitmaps.pin(density)
+        val pos = LatLng(lat, lon)
+        val m = searchMarker
+        if (m == null) searchMarker = gm.addMarker(MarkerOptions().position(pos)
+            .icon(BitmapDescriptorFactory.fromBitmap(searchPinBmp!!)).anchor(0.5f, 1.0f).zIndex(11f))
+        else m.position = pos
+    }
 
     private fun addMarker(gm: GoogleMap, lat: Double, lon: Double, bmp: Bitmap, z: Float): Marker? =
         gm.addMarker(MarkerOptions().position(LatLng(lat, lon))
@@ -377,6 +407,11 @@ class GoogleMapController(
         val gm = map ?: return null
         val pt: Point = gm.projection.toScreenLocation(LatLng(lat, lon))
         return PointF(pt.x.toFloat(), pt.y.toFloat())
+    }
+    override fun fromScreen(x: Float, y: Float): LL? {
+        val gm = map ?: return null
+        val ll = gm.projection.fromScreenLocation(Point(x.toInt(), y.toInt()))
+        return LL(ll.latitude, ll.longitude)
     }
     override fun centerOn(lat: Double, lon: Double, animate: Boolean) {
         val gm = map ?: return

@@ -34,4 +34,19 @@ class Prefs(ctx: Context) {
     var liveSource: String
         get() = sp.getString("live_source", "network") ?: "network"
         set(v) { sp.edit().putString("live_source", v).apply() }
+
+    // User geofences (device-local), a JSON array of {id,lat,lon,r}. Persisted across launches.
+    var geofencesJson: String
+        get() = sp.getString("geofences", "[]") ?: "[]"
+        set(v) { sp.edit().putString("geofences", v).apply() }
+
+    // Tapped search places, most-recent-first JSON (capped at 100 by the caller).
+    var historyJson: String
+        get() = sp.getString("search_history", "[]") ?: "[]"
+        set(v) { sp.edit().putString("search_history", v).apply() }
+
+    // Set once the existing local zones have been pushed up to the add-on DB (one-time migration).
+    var zonesMigrated: Boolean
+        get() = sp.getBoolean("zones_migrated", false)
+        set(v) { sp.edit().putBoolean("zones_migrated", v).apply() }
 }

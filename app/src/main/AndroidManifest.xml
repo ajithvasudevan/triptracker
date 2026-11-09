@@ -5,6 +5,12 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
     <!-- direct same-device GPS stream from mymessages; signature-level so only same-signed apps can send -->
     <permission
@@ -47,6 +53,29 @@
                 <action android:name="dev.ajithv.triptracker.LIVE_POINT" />
             </intent-filter>
         </receiver>
+
+        <!-- OS geofence transitions → alert (fires with the app backgrounded or killed) -->
+        <receiver
+            android:name=".GeofenceReceiver"
+            android:exported="false" />
+        <!-- re-register the geofences with the OS after a reboot -->
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- vibrates strongly + shows the ongoing “tap to stop” notification on zone entry/exit -->
+        <service
+            android:name=".AlertService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="alert_zone_vibration" />
+        </service>
 
         <activity
             android:name=".MainActivity"
