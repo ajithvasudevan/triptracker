@@ -262,6 +262,10 @@ class MainActivity : AppCompatActivity() {
         repo = PhotoRepo(api)
         liveStore = LiveStore(this)
         MapLibre.getInstance(this)
+        // Force MapLibre to treat the device as always-connected so that, when the app returns
+        // to the foreground during a network outage, it serves the already-cached tiles (and keeps
+        // retrying) instead of deferring every tile request on its offline flag and going blank.
+        MapLibre.setConnected(true)
         setContentView(R.layout.activity_main)
 
         drawer = findViewById(R.id.drawer_layout)
@@ -2707,6 +2711,12 @@ class MainActivity : AppCompatActivity() {
                 (if (activeTripId != null) "\nStored locally for the active trip: $n points." else "")
         }
         root.addView(liveSw); root.addView(liveHint)
+        val verName = try { packageManager.getPackageInfo(packageName, 0).versionName } catch (e: Exception) { "?" }
+        root.addView(TextView(this).apply {
+            text = "Trip Tracker · version $verName"
+            textSize = 12f; alpha = 0.55f
+            val t = (18 * resources.displayMetrics.density).toInt(); setPadding(0, t, 0, t)
+        })
         AlertDialog.Builder(this).setTitle("Settings").setView(root)
             .setPositiveButton("Save & reconnect") { _, _ ->
                 prefs.baseUrl = url.text.toString(); prefs.token = tok.text.toString()

@@ -60,13 +60,23 @@
             android:src="@android:drawable/ic_media_play"
             android:contentDescription="Replay trip" />
 
-        <!-- top-right, under the play button: compass (shown when rotated; tap = north-up) -->
+        <!-- top-right, under the play button: place search (lens → field → results) -->
+        <ImageButton
+            android:id="@+id/search_button"
+            style="@style/TtMapBtn"
+            android:layout_gravity="top|end"
+            android:layout_marginEnd="10dp"
+            android:layout_marginTop="118dp"
+            android:src="@drawable/ic_search"
+            android:contentDescription="Search places" />
+
+        <!-- top-right, under the search button: compass (shown when rotated; tap = north-up) -->
         <ImageButton
             android:id="@+id/btn_compass"
             style="@style/TtMapBtn"
             android:layout_gravity="top|end"
             android:layout_marginEnd="10dp"
-            android:layout_marginTop="118dp"
+            android:layout_marginTop="172dp"
             android:tint="@null"
             android:src="@drawable/ic_compass"
             android:visibility="gone"
@@ -263,16 +273,8 @@
             </LinearLayout>
         </LinearLayout>
 
-        <!-- place search: a lens button that expands into a search field + results list -->
-        <ImageButton
-            android:id="@+id/search_button"
-            style="@style/TtMapBtn"
-            android:layout_gravity="top|start"
-            android:layout_marginStart="64dp"
-            android:layout_marginTop="10dp"
-            android:src="@drawable/ic_search"
-            android:contentDescription="Search places" />
-
+        <!-- place search: the lens button lives in the map right-side button stack (inside mapwrap,
+             under the play button); this is the panel it expands into -->
         <LinearLayout
             android:id="@+id/search_panel"
             android:layout_width="match_parent"
